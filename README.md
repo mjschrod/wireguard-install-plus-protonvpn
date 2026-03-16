@@ -74,8 +74,11 @@ This project is under the [MIT Licence](https://raw.githubusercontent.com/angris
 
 
 XXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
 NEW BY FORK
+
 XXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
 
 # WireGuard-Remotezugang mit ProtonVPN-Uplink und WAN-Bypass für Heimdienste
 
@@ -124,14 +127,14 @@ Dieses Setup setzt voraus, dass der Router **Hairpin NAT / NAT Loopback** für Z
 
 Diese Anleitung nutzt folgende Beispielwerte:
 
-- WireGuard-Servernetz: `10.7.0.0/24`
-- WireGuard-Server-IP: `10.7.0.1/24`
-- Android-Client-IP: `10.7.0.2/32`
+- WireGuard-Servernetz: `10.66.66.0/24`
+- WireGuard-Server-IP: `10.66.66.1/24`
+- Android-Client-IP: `10.66.66.2/32`
 - Heimnetz: `192.168.0.0/22`
-- LXC-LAN-Interface: `eth0`
+- LXC-LAN-Interface: `ens18`
 - DynDNS-Name für die WAN-IP: `wg.schlumpf.gleeze.com`
 - Beispiel-Dienst: `dienst.schlumpf.gleeze.com:44385`
-- Policy-Routing-Tabelle für ProtonVPN: `proton`
+- Policy-Routing-Tabelle für ProtonVPN: `200`
 
 ---
 
@@ -167,10 +170,16 @@ echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ipforward.conf
 sysctl --system
 ```
 
-### 3. Routing-Tabelle `proton` existiert
+### 3. Routing-Tabelle `200` existiert
+
+Bei Debian Trixie fehlt `/etc/iproute2` unter Umständen standardmäßig. Daher entweder die Tabelle per Name anlegen oder direkt nur die Nummer verwenden.
+
+Diese Anleitung verwendet **direkt die numerische Tabelle `200`**.
+
+Prüfung:
 
 ```bash
-grep -q '^200 proton$' /etc/iproute2/rt_tables || echo '200 proton' >> /etc/iproute2/rt_tables
+ip route show table 200
 ```
 
 ---
@@ -188,200 +197,6 @@ Es gibt drei Bausteine:
    - pflegt daraus die aktuelle `/32`-Bypass-Regel für die WAN-IP
 
 Dadurch ist die WAN-IP **nicht hart im Setup kodiert**.
-
----
-
-## Skript 1: `/usr/local/sbin/wg-policy-up.sh`
-
-Dieses Skript setzt die festen Regeln für:
-
-- Heimnetz lokal
-- Standardverkehr über ProtonVPN
-- NAT und Forwarding
-- und ruft am Ende den WAN-Updater auf
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-WG_NET="10.7.0.0/24"
-LAN_NET="192.168.0.0/22"
-LAN_IF="eth0"
-PROTON_TABLE="proton"
-WAN_UPDATER="/usr/local/sbin/update-wan-bypass.sh"
-
-# proton0 muss existieren
-ip link show proton0 >/dev/null 2>&1
-
-# Proton-Default-Route in eigene Tabelle
-ip route replace default dev proton0 table "${PROTON_TABLE}"
-
-# Feste Policy-Regeln sauber neu setzen
-ip rule del from "${WG_NET}" to "${LAN_NET}" lookup main priority 100 2>/dev/null || true
-ip rule del from "${WG_NET}" lookup "${PROTON_TABLE}" priority 200 2>/dev/null || true
-
-ip rule add from "${WG_NET}" to "${LAN_NET}" lookup main priority 100
-ip rule add from "${WG_NET}" lookup "${PROTON_TABLE}" priority 200
-
-# NAT für LAN
-iptables -t nat -C POSTROUTING -s "${WG_NET}" -d "${LAN_NET}" -o "${LAN_IF}" -j MASQUERADE >/dev/null 2>&1 || \
-iptables -t nat -A POSTROUTING -s "${WG_NET}" -d "${LAN_NET}" -o "${LAN_IF}" -j MASQUERADE
-
-# NAT für Proton
-iptables -t nat -C POSTROUTING -s "${WG_NET}" -o proton0 -j MASQUERADE >/dev/null 2>&1 || \
-iptables -t nat -A POSTROUTING -s "${WG_NET}" -o proton0 -j MASQUERADE
-
-# Forwarding WG -> Proton
-iptables -C FORWARD -i wg0 -o proton0 -j ACCEPT >/dev/null 2>&1 || \
-iptables -A FORWARD -i wg0 -o proton0 -j ACCEPT
-
-iptables -C FORWARD -i proton0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \
-iptables -A FORWARD -i proton0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-# Forwarding WG -> LAN
-iptables -C FORWARD -i wg0 -o "${LAN_IF}" -d "${LAN_NET}" -j ACCEPT >/dev/null 2>&1 || \
-iptables -A FORWARD -i wg0 -o "${LAN_IF}" -d "${LAN_NET}" -j ACCEPT
-
-iptables -C FORWARD -i "${LAN_IF}" -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \
-iptables -A FORWARD -i "${LAN_IF}" -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-# Dynamische WAN-Bypass-Regel setzen/aktualisieren
-"${WAN_UPDATER}"
-```
-
-Danach ausführbar machen:
-
-```bash
-chmod +x /usr/local/sbin/wg-policy-up.sh
-```
-
----
-
-## Skript 2: `/usr/local/sbin/wg-policy-down.sh`
-
-Dieses Skript entfernt beim Stoppen von `wg0` alle gesetzten Regeln wieder.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-WG_NET="10.7.0.0/24"
-LAN_NET="192.168.0.0/22"
-LAN_IF="eth0"
-PROTON_TABLE="proton"
-STATE_FILE="/var/lib/wg-wan-bypass/current_wan_ip"
-
-# Dynamische WAN-Regel entfernen
-if [ -f "${STATE_FILE}" ]; then
-  WAN_IP="$(cat "${STATE_FILE}")"
-
-  ip rule del from "${WG_NET}" to "${WAN_IP}/32" lookup main priority 110 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -s "${WG_NET}" -d "${WAN_IP}/32" -o "${LAN_IF}" -j MASQUERADE 2>/dev/null || true
-  iptables -D FORWARD -i wg0 -o "${LAN_IF}" -d "${WAN_IP}/32" -j ACCEPT 2>/dev/null || true
-fi
-
-# Feste Policy-Regeln entfernen
-ip rule del from "${WG_NET}" to "${LAN_NET}" lookup main priority 100 2>/dev/null || true
-ip rule del from "${WG_NET}" lookup "${PROTON_TABLE}" priority 200 2>/dev/null || true
-ip route del default dev proton0 table "${PROTON_TABLE}" 2>/dev/null || true
-
-# NAT entfernen
-iptables -t nat -D POSTROUTING -s "${WG_NET}" -d "${LAN_NET}" -o "${LAN_IF}" -j MASQUERADE 2>/dev/null || true
-iptables -t nat -D POSTROUTING -s "${WG_NET}" -o proton0 -j MASQUERADE 2>/dev/null || true
-
-# Forwarding entfernen
-iptables -D FORWARD -i wg0 -o proton0 -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i proton0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i wg0 -o "${LAN_IF}" -d "${LAN_NET}" -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "${LAN_IF}" -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-```
-
-Danach ausführbar machen:
-
-```bash
-chmod +x /usr/local/sbin/wg-policy-down.sh
-```
-
----
-
-## Skript 3: `/usr/local/sbin/update-wan-bypass.sh`
-
-Dieses Skript löst den DynDNS-Namen auf und pflegt die aktuelle `/32`-Bypass-Regel.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-WG_NET="10.7.0.0/24"
-LAN_IF="eth0"
-WAN_HOST="wg.schlumpf.gleeze.com"
-STATE_DIR="/var/lib/wg-wan-bypass"
-STATE_FILE="${STATE_DIR}/current_wan_ip"
-
-mkdir -p "${STATE_DIR}"
-
-NEW_IP="$(getent ahostsv4 "${WAN_HOST}" | awk '{print $1; exit}')"
-
-if [ -z "${NEW_IP}" ]; then
-  echo "Konnte ${WAN_HOST} nicht auflösen" >&2
-  exit 1
-fi
-
-OLD_IP=""
-if [ -f "${STATE_FILE}" ]; then
-  OLD_IP="$(cat "${STATE_FILE}")"
-fi
-
-# Alte, abweichende Regel entfernen
-if [ -n "${OLD_IP}" ] && [ "${OLD_IP}" != "${NEW_IP}" ]; then
-  ip rule del from "${WG_NET}" to "${OLD_IP}/32" lookup main priority 110 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -s "${WG_NET}" -d "${OLD_IP}/32" -o "${LAN_IF}" -j MASQUERADE 2>/dev/null || true
-  iptables -D FORWARD -i wg0 -o "${LAN_IF}" -d "${OLD_IP}/32" -j ACCEPT 2>/dev/null || true
-fi
-
-# Regel für aktuelle WAN-IP sauber neu setzen
-ip rule del from "${WG_NET}" to "${NEW_IP}/32" lookup main priority 110 2>/dev/null || true
-ip rule add from "${WG_NET}" to "${NEW_IP}/32" lookup main priority 110
-
-iptables -t nat -C POSTROUTING -s "${WG_NET}" -d "${NEW_IP}/32" -o "${LAN_IF}" -j MASQUERADE >/dev/null 2>&1 || \
-iptables -t nat -A POSTROUTING -s "${WG_NET}" -d "${NEW_IP}/32" -o "${LAN_IF}" -j MASQUERADE
-
-iptables -C FORWARD -i wg0 -o "${LAN_IF}" -d "${NEW_IP}/32" -j ACCEPT >/dev/null 2>&1 || \
-iptables -A FORWARD -i wg0 -o "${LAN_IF}" -d "${NEW_IP}/32" -j ACCEPT
-
-echo "${NEW_IP}" > "${STATE_FILE}"
-```
-
-Danach ausführbar machen:
-
-```bash
-chmod +x /usr/local/sbin/update-wan-bypass.sh
-```
-
----
-
-## WireGuard-Serverkonfiguration `/etc/wireguard/wg0.conf`
-
-Im `wg0`-Interface werden die Skripte per `PostUp` und `PostDown` eingebunden.
-
-```ini
-# Do not alter the commented lines
-# They are used by wireguard-install
-# ENDPOINT wg-pesthund.duckdns.org
-
-[Interface]
-Address = 10.7.0.1/24
-PrivateKey = <SERVER_PRIVATE_KEY>
-ListenPort = 51828
-PostUp = /usr/local/sbin/wg-policy-up.sh
-PostDown = /usr/local/sbin/wg-policy-down.sh
-
-# BEGIN_PEER android
-[Peer]
-PublicKey = <ANDROID_PUBLIC_KEY>
-PresharedKey = <OPTIONAL_PRESHARED_KEY>
-AllowedIPs = 10.7.0.2/32
-```
 
 ---
 
@@ -494,6 +309,196 @@ Dann sind meist diese Punkte zu prüfen:
 
 ---
 
+## Skript 1: `/usr/local/sbin/wg-policy-up.sh`
+
+Dieses Skript setzt die festen Regeln für:
+
+- Heimnetz lokal
+- Standardverkehr über ProtonVPN
+- NAT und Forwarding
+- und ruft am Ende den WAN-Updater auf
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_NET="10.66.66.0/24"
+LAN_NET="192.168.0.0/22"
+LAN_IF="ens18"
+PROTON_TABLE="200"
+WAN_UPDATER="/usr/local/sbin/update-wan-bypass.sh"
+
+# proton0 muss existieren
+ip link show proton0 >/dev/null 2>&1
+
+# Proton-Default-Route in eigene Tabelle
+ip route replace default dev proton0 table "${PROTON_TABLE}"
+
+# Feste Policy-Regeln sauber neu setzen
+ip rule del from "${WG_NET}" to "${LAN_NET}" lookup main priority 100 2>/dev/null || true
+ip rule del from "${WG_NET}" lookup "${PROTON_TABLE}" priority 200 2>/dev/null || true
+
+ip rule add from "${WG_NET}" to "${LAN_NET}" lookup main priority 100
+ip rule add from "${WG_NET}" lookup "${PROTON_TABLE}" priority 200
+
+# NAT für LAN
+iptables -t nat -C POSTROUTING -s "${WG_NET}" -d "${LAN_NET}" -o "${LAN_IF}" -j MASQUERADE >/dev/null 2>&1 || \
+iptables -t nat -A POSTROUTING -s "${WG_NET}" -d "${LAN_NET}" -o "${LAN_IF}" -j MASQUERADE
+
+# NAT für Proton
+iptables -t nat -C POSTROUTING -s "${WG_NET}" -o proton0 -j MASQUERADE >/dev/null 2>&1 || \
+iptables -t nat -A POSTROUTING -s "${WG_NET}" -o proton0 -j MASQUERADE
+
+# Forwarding WG -> Proton
+iptables -C FORWARD -i wg0 -o proton0 -j ACCEPT >/dev/null 2>&1 || \
+iptables -A FORWARD -i wg0 -o proton0 -j ACCEPT
+
+iptables -C FORWARD -i proton0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \
+iptables -A FORWARD -i proton0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# Forwarding WG -> LAN
+iptables -C FORWARD -i wg0 -o "${LAN_IF}" -d "${LAN_NET}" -j ACCEPT >/dev/null 2>&1 || \
+iptables -A FORWARD -i wg0 -o "${LAN_IF}" -d "${LAN_NET}" -j ACCEPT
+
+iptables -C FORWARD -i "${LAN_IF}" -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \
+iptables -A FORWARD -i "${LAN_IF}" -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# Dynamische WAN-Bypass-Regel setzen/aktualisieren
+"${WAN_UPDATER}"
+```
+
+Danach ausführbar machen:
+
+```bash
+chmod +x /usr/local/sbin/wg-policy-up.sh
+```
+
+---
+
+## Skript 2: `/usr/local/sbin/wg-policy-down.sh`
+
+Dieses Skript entfernt beim Stoppen von `wg0` alle gesetzten Regeln wieder.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_NET="10.66.66.0/24"
+LAN_NET="192.168.0.0/22"
+LAN_IF="ens18"
+PROTON_TABLE="200"
+STATE_FILE="/var/lib/wg-wan-bypass/current_wan_ip"
+
+# Dynamische WAN-Regel entfernen
+if [ -f "${STATE_FILE}" ]; then
+  WAN_IP="$(cat "${STATE_FILE}")"
+
+  ip rule del from "${WG_NET}" to "${WAN_IP}/32" lookup main priority 110 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -s "${WG_NET}" -d "${WAN_IP}/32" -o "${LAN_IF}" -j MASQUERADE 2>/dev/null || true
+  iptables -D FORWARD -i wg0 -o "${LAN_IF}" -d "${WAN_IP}/32" -j ACCEPT 2>/dev/null || true
+fi
+
+# Feste Policy-Regeln entfernen
+ip rule del from "${WG_NET}" to "${LAN_NET}" lookup main priority 100 2>/dev/null || true
+ip rule del from "${WG_NET}" lookup "${PROTON_TABLE}" priority 200 2>/dev/null || true
+ip route del default dev proton0 table "${PROTON_TABLE}" 2>/dev/null || true
+
+# NAT entfernen
+iptables -t nat -D POSTROUTING -s "${WG_NET}" -d "${LAN_NET}" -o "${LAN_IF}" -j MASQUERADE 2>/dev/null || true
+iptables -t nat -D POSTROUTING -s "${WG_NET}" -o proton0 -j MASQUERADE 2>/dev/null || true
+
+# Forwarding entfernen
+iptables -D FORWARD -i wg0 -o proton0 -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i proton0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i wg0 -o "${LAN_IF}" -d "${LAN_NET}" -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i "${LAN_IF}" -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+```
+
+Danach ausführbar machen:
+
+```bash
+chmod +x /usr/local/sbin/wg-policy-down.sh
+```
+
+---
+
+## Skript 3: `/usr/local/sbin/update-wan-bypass.sh`
+
+Dieses Skript löst den DynDNS-Namen auf und pflegt die aktuelle `/32`-Bypass-Regel.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_NET="10.66.66.0/24"
+LAN_IF="ens18"
+WAN_HOST="wg.schlumpf.gleeze.com"
+STATE_DIR="/var/lib/wg-wan-bypass"
+STATE_FILE="${STATE_DIR}/current_wan_ip"
+
+mkdir -p "${STATE_DIR}"
+
+NEW_IP="$(getent ahostsv4 "${WAN_HOST}" | awk '{print $1; exit}')"
+
+if [ -z "${NEW_IP}" ]; then
+  echo "Konnte ${WAN_HOST} nicht auflösen" >&2
+  exit 1
+fi
+
+OLD_IP=""
+if [ -f "${STATE_FILE}" ]; then
+  OLD_IP="$(cat "${STATE_FILE}")"
+fi
+
+# Alte, abweichende Regel entfernen
+if [ -n "${OLD_IP}" ] && [ "${OLD_IP}" != "${NEW_IP}" ]; then
+  ip rule del from "${WG_NET}" to "${OLD_IP}/32" lookup main priority 110 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -s "${WG_NET}" -d "${OLD_IP}/32" -o "${LAN_IF}" -j MASQUERADE 2>/dev/null || true
+  iptables -D FORWARD -i wg0 -o "${LAN_IF}" -d "${OLD_IP}/32" -j ACCEPT 2>/dev/null || true
+fi
+
+# Regel für aktuelle WAN-IP sauber neu setzen
+ip rule del from "${WG_NET}" to "${NEW_IP}/32" lookup main priority 110 2>/dev/null || true
+ip rule add from "${WG_NET}" to "${NEW_IP}/32" lookup main priority 110
+
+iptables -t nat -C POSTROUTING -s "${WG_NET}" -d "${NEW_IP}/32" -o "${LAN_IF}" -j MASQUERADE >/dev/null 2>&1 || \
+iptables -t nat -A POSTROUTING -s "${WG_NET}" -d "${NEW_IP}/32" -o "${LAN_IF}" -j MASQUERADE
+
+iptables -C FORWARD -i wg0 -o "${LAN_IF}" -d "${NEW_IP}/32" -j ACCEPT >/dev/null 2>&1 || \
+iptables -A FORWARD -i wg0 -o "${LAN_IF}" -d "${NEW_IP}/32" -j ACCEPT
+
+echo "${NEW_IP}" > "${STATE_FILE}"
+```
+
+Danach ausführbar machen:
+
+```bash
+chmod +x /usr/local/sbin/update-wan-bypass.sh
+```
+
+---
+
+## WireGuard-Serverkonfiguration `/etc/wireguard/wg0.conf`
+
+Im `wg0`-Interface werden die Skripte per `PostUp` und `PostDown` eingebunden.
+
+```ini
+[Interface]
+Address = 10.66.66.1/24,fd42:42:42::1/64
+ListenPort = 64375
+PrivateKey = <SERVER_PRIVATE_KEY>
+DNS = 192.168.0.1
+PostUp = /usr/local/sbin/wg-policy-up.sh
+PostDown = /usr/local/sbin/wg-policy-down.sh
+
+[Peer]
+PublicKey = <ANDROID_PUBLIC_KEY>
+PresharedKey = <OPTIONAL_PRESHARED_KEY>
+AllowedIPs = 10.66.66.2/32,fd42:42:42::2/128
+```
+
+---
+
 ## Android-Client-Profil
 
 In der Android-WireGuard-App wird ein Profil angelegt, das allen Verkehr zunächst an `wg0` sendet.
@@ -501,16 +506,18 @@ In der Android-WireGuard-App wird ein Profil angelegt, das allen Verkehr zunäch
 ```ini
 [Interface]
 PrivateKey = <ANDROID_PRIVATE_KEY>
-Address = 10.7.0.2/32
-DNS = 1.1.1.1
+Address = 10.66.66.2/32,fd42:42:42::2/128
+DNS = 192.168.0.1
 
 [Peer]
 PublicKey = <SERVER_PUBLIC_KEY>
 PresharedKey = <OPTIONAL_PRESHARED_KEY>
-Endpoint = wg.schlumpf.gleeze.com:51828
+Endpoint = wg.schlumpf.gleeze.com:64375
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 ```
+
+**Wichtig:** Wenn auf Android bei `ifconfig.me` weiter die Router-WAN erscheint, ist fast immer `AllowedIPs` auf dem Client nicht als Volltunnel gesetzt oder der Tunnel ist app-/split-seitig eingeschränkt.
 
 ---
 
@@ -602,7 +609,7 @@ systemctl enable --now wg-quick@wg0
 ```bash
 wg show
 ip rule
-ip route show table proton
+ip route show table 200
 cat /var/lib/wg-wan-bypass/current_wan_ip
 ```
 
@@ -632,19 +639,31 @@ cat /var/lib/wg-wan-bypass/current_wan_ip
 ### Prüfen, ob die WAN-IP-Ausnahme greift
 
 ```bash
-ip route get $(cat /var/lib/wg-wan-bypass/current_wan_ip) from 10.7.0.2 iif wg0
+ip route get $(cat /var/lib/wg-wan-bypass/current_wan_ip) from 10.66.66.2 iif wg0
 ```
 
 Erwartet sinngemäß:
 
 ```text
-<wan-ip> from 10.7.0.2 via 192.168.0.1 dev eth0
+<wan-ip> from 10.66.66.2 via 192.168.0.1 dev ens18
+```
+
+### Prüfen, ob Internet über Proton geht
+
+```bash
+ip route get 1.1.1.1 from 10.66.66.2 iif wg0
+```
+
+Erwartet:
+
+```text
+1.1.1.1 from 10.66.66.2 dev proton0 table 200
 ```
 
 ### Mitschnitt für den Dienstpfad
 
 ```bash
-tcpdump -ni eth0 host $(cat /var/lib/wg-wan-bypass/current_wan_ip) and port 44385
+tcpdump -ni ens18 host $(cat /var/lib/wg-wan-bypass/current_wan_ip) and port 44385
 ```
 
 ### Mitschnitt für ProtonVPN
@@ -671,11 +690,17 @@ Wenn der Router keine Zugriffe auf die eigene WAN-IP aus dem LAN korrekt zurück
 
 ### 2. IPv6 beachten
 
-Wenn `dienst.schlumpf.gleeze.com` zusätzlich einen AAAA-Record liefert, kann ein Client über IPv6 zugreifen. Diese Anleitung behandelt den WAN-Bypass **explizit über IPv4**. Falls nötig, muss ein analoger IPv6-Bypass ergänzt werden.
+Das Setup behandelt den WAN-Bypass explizit über **IPv4**. Wenn `dienst.schlumpf.gleeze.com` oder andere Ziele zusätzlich AAAA-Records liefern, kann ein Client über IPv6 zugreifen. Dafür müsste ein analoger IPv6-Bypass ergänzt werden.
 
-### 3. Keine zweite allgemeine Firewalllösung parallel einmischen
+### 3. Alte breite iptables-Regeln entfernen
 
-Diese Anleitung geht davon aus, dass die relevanten Regeln über die Skripte gesetzt werden. Zusätzliche Firewall-Tools oder persistente iptables-Dumps können das Verhalten verändern.
+Frühere pauschale Regeln wie:
+
+- `-A POSTROUTING -o ens18 -j MASQUERADE`
+- `-A FORWARD -i wg0 -j ACCEPT`
+- `-A FORWARD -i ens18 -o wg0 -j ACCEPT`
+
+sollten entfernt werden, damit nur noch die gezielten Regeln aus den Skripten aktiv sind.
 
 ---
 
@@ -690,7 +715,7 @@ Dieses Setup macht aus einem Debian-LXC gleichzeitig:
 Der zentrale Trick ist:
 
 - **Internetverkehr** des Remote-Clients → über **`proton0`**
-- **Heimnetz und eigene WAN-IP** → über **`eth0` / lokalen Router**
+- **Heimnetz und eigene WAN-IP** → über **`ens18` / lokalen Router**
 - die **aktuelle WAN-IP** wird automatisch aus einem DynDNS-Namen aufgelöst und als `/32`-Bypass-Regel gepflegt.
 
 Dadurch bleibt ein Heimdienst wie `dienst.schlumpf.gleeze.com:44385` über den normalen Heimanschluss erreichbar, während sonstiger Verkehr über ProtonVPN läuft.
