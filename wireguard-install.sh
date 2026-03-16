@@ -51,7 +51,7 @@ function checkOS() {
 			echo "Your version of Debian (${VERSION_ID}) is not supported. Please use Debian 10 Buster or later"
 			exit 1
 		fi
-		OS=debian # overwrite if raspbian
+		OS=debian
 	elif [[ ${OS} == "ubuntu" ]]; then
 		RELEASE_YEAR=$(echo "${VERSION_ID}" | cut -d'.' -f1)
 		if [[ ${RELEASE_YEAR} -lt 18 ]]; then
@@ -94,20 +94,15 @@ function getHomeDirForClient() {
 		exit 1
 	fi
 
-	# Home directory of the user, where the client configuration will be written
 	if [ -e "/home/${CLIENT_NAME}" ]; then
-		# if $1 is a user name
 		HOME_DIR="/home/${CLIENT_NAME}"
 	elif [ "${SUDO_USER}" ]; then
-		# if not, use SUDO_USER
 		if [ "${SUDO_USER}" == "root" ]; then
-			# If running sudo as root
 			HOME_DIR="/root"
 		else
 			HOME_DIR="/home/${SUDO_USER}"
 		fi
 	else
-		# if not SUDO_USER, use /root
 		HOME_DIR="/root"
 	fi
 
@@ -116,11 +111,8 @@ function getHomeDirForClient() {
 
 function detectLocalDNS() {
 	local GW
-
-	# Standardgateway ermitteln
 	GW=$(ip -4 route ls default | awk '{print $3}' | head -1)
 
-	# Nur private IPv4-Adressen akzeptieren
 	if [[ ${GW} =~ ^10\. ]] || \
 	   [[ ${GW} =~ ^192\.168\. ]] || \
 	   [[ ${GW} =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
@@ -144,15 +136,12 @@ function installQuestions() {
 	echo "You can keep the default options and just press enter if you are ok with them."
 	echo ""
 
-	# Detect public IPv4 or IPv6 address and pre-fill for the user
 	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
 	if [[ -z ${SERVER_PUB_IP} ]]; then
-		# Detect public IPv6 address
 		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 	fi
 	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 
-	# Detect public interface and pre-fill for the user
 	SERVER_NIC="$(ip -4 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
 	until [[ ${SERVER_PUB_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
 		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
@@ -170,13 +159,11 @@ function installQuestions() {
 		read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
 	done
 
-	# Generate random number within private ports range
 	RANDOM_PORT=$(shuf -i49152-65535 -n1)
 	until [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && [ "${SERVER_PORT}" -ge 1 ] && [ "${SERVER_PORT}" -le 65535 ]; do
 		read -rp "Server WireGuard port [1-65535]: " -e -i "${RANDOM_PORT}" SERVER_PORT
 	done
 
-	# Cloudflare DNS by default
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
 		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
 	done
@@ -187,13 +174,7 @@ function installQuestions() {
 		fi
 	done
 
-	# Lokalen DNS automatisch erkennen (meist das Default-Gateway)
-	CLIENT_DNS_3=$(detectLocalDNS)
-
-	# Doppelte DNS-Einträge vermeiden
-	if [[ "${CLIENT_DNS_3}" == "${CLIENT_DNS_1}" ]] || [[ "${CLIENT_DNS_3}" == "${CLIENT_DNS_2}" ]]; then
-		CLIENT_DNS_3=""
-	fi
+	LOCAL_DNS=$(detectLocalDNS)
 
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
@@ -205,19 +186,16 @@ function installQuestions() {
 
 	echo ""
 	echo "Okay, that was all I needed. We are ready to setup your WireGuard server now."
-	if [[ -n "${CLIENT_DNS_3}" ]]; then
-		echo "Detected local DNS resolver: ${CLIENT_DNS_3}"
-		echo "It will be added automatically to generated client configs."
+	if [[ -n "${LOCAL_DNS}" ]]; then
+		echo "Detected local DNS for server wg config: ${LOCAL_DNS}"
 	fi
 	echo "You will be able to generate a client at the end of the installation."
 	read -n1 -r -p "Press any key to continue..."
 }
 
 function installWireGuard() {
-	# Run setup questions first
 	installQuestions
 
-	# Install WireGuard tools and module
 	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' && ${VERSION_ID} -gt 10 ]]; then
 		apt-get update
 		installPackages apt-get install -y wireguard iptables resolvconf qrencode
@@ -240,7 +218,7 @@ function installWireGuard() {
 		if [[ ${VERSION_ID} == 8* ]]; then
 			installPackages yum install -y epel-release elrepo-release
 			installPackages yum install -y kmod-wireguard
-			yum install -y qrencode || true # not available on release 9
+			yum install -y qrencode || true
 		fi
 		installPackages yum install -y wireguard-tools iptables
 	elif [[ ${OS} == 'oracle' ]]; then
@@ -256,22 +234,18 @@ function installWireGuard() {
 		installPackages apk add wireguard-tools iptables libqrencode-tools
 	fi
 
-	# Verify WireGuard installation
 	if ! command -v wg &>/dev/null; then
 		echo -e "${RED}WireGuard installation failed. The 'wg' command was not found.${NC}"
 		echo "Please check the installation output above for errors."
 		exit 1
 	fi
 
-	# Make sure the directory exists (this does not seem the be the case on fedora)
 	mkdir /etc/wireguard >/dev/null 2>&1
-
 	chmod 600 -R /etc/wireguard/
 
 	SERVER_PRIV_KEY=$(wg genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | wg pubkey)
 
-	# Save WireGuard settings
 	echo "SERVER_PUB_IP=${SERVER_PUB_IP}
 SERVER_PUB_NIC=${SERVER_PUB_NIC}
 SERVER_WG_NIC=${SERVER_WG_NIC}
@@ -282,14 +256,17 @@ SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
 SERVER_PUB_KEY=${SERVER_PUB_KEY}
 CLIENT_DNS_1=${CLIENT_DNS_1}
 CLIENT_DNS_2=${CLIENT_DNS_2}
-CLIENT_DNS_3=${CLIENT_DNS_3}
+LOCAL_DNS=${LOCAL_DNS}
 ALLOWED_IPS=${ALLOWED_IPS}" >/etc/wireguard/params
 
-	# Add server interface
 	echo "[Interface]
 Address = ${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}" >"/etc/wireguard/${SERVER_WG_NIC}.conf"
+
+	if [[ -n "${LOCAL_DNS}" ]]; then
+		echo "DNS = ${LOCAL_DNS}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+	fi
 
 	if pgrep firewalld; then
 		FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_WG_IPV4}" | cut -d"." -f1-3)".0"
@@ -311,7 +288,6 @@ PostDown = ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
 PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	fi
 
-	# Enable routing on the server
 	echo "net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 
@@ -328,7 +304,6 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 		rc-update add "wg-quick.${SERVER_WG_NIC}"
 	else
 		sysctl --system
-
 		systemctl start "wg-quick@${SERVER_WG_NIC}"
 		systemctl enable "wg-quick@${SERVER_WG_NIC}"
 	fi
@@ -336,7 +311,6 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 	newClient
 	echo -e "${GREEN}If you want to add more clients, you simply need to run this script another time!${NC}"
 
-	# Check if WireGuard is running
 	if [[ ${OS} == 'alpine' ]]; then
 		rc-service --quiet "wg-quick.${SERVER_WG_NIC}" status
 	else
@@ -344,7 +318,6 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 	fi
 	WG_RUNNING=$?
 
-	# WireGuard might not work if we updated the kernel. Tell the user to reboot
 	if [[ ${WG_RUNNING} -ne 0 ]]; then
 		echo -e "\n${RED}WARNING: WireGuard does not seem to be running.${NC}"
 		if [[ ${OS} == 'alpine' ]]; then
@@ -353,7 +326,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 			echo -e "${ORANGE}You can check if WireGuard is running with: systemctl status wg-quick@${SERVER_WG_NIC}${NC}"
 		fi
 		echo -e "${ORANGE}If you get something like \"Cannot find device ${SERVER_WG_NIC}\", please reboot!${NC}"
-	else # WireGuard is running
+	else
 		echo -e "\n${GREEN}WireGuard is running.${NC}"
 		if [[ ${OS} == 'alpine' ]]; then
 			echo -e "${GREEN}You can check the status of WireGuard with: rc-service wg-quick.${SERVER_WG_NIC} status\n\n${NC}"
@@ -365,7 +338,6 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 }
 
 function newClient() {
-	# If SERVER_PUB_IP is IPv6, add brackets if missing
 	if [[ ${SERVER_PUB_IP} =~ .*:.* ]]; then
 		if [[ ${SERVER_PUB_IP} != *"["* ]] || [[ ${SERVER_PUB_IP} != *"]"* ]]; then
 			SERVER_PUB_IP="[${SERVER_PUB_IP}]"
@@ -428,24 +400,16 @@ function newClient() {
 		fi
 	done
 
-	# Generate key pair for the client
 	CLIENT_PRIV_KEY=$(wg genkey)
 	CLIENT_PUB_KEY=$(echo "${CLIENT_PRIV_KEY}" | wg pubkey)
 	CLIENT_PRE_SHARED_KEY=$(wg genpsk)
 
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
-	if [[ -n "${CLIENT_DNS_3}" ]]; then
-		CLIENT_DNS_LINE="DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2},${CLIENT_DNS_3}"
-	else
-		CLIENT_DNS_LINE="DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}"
-	fi
-
-	# Create client file and add the server as a peer
 	echo "[Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
-${CLIENT_DNS_LINE}
+DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}
 
 # Uncomment the next line to set a custom MTU
 # This might impact performance, so use it only if you know what you are doing
@@ -458,7 +422,6 @@ PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT}
 AllowedIPs = ${ALLOWED_IPS}" >"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
 
-	# Add the client as a peer to the server
 	echo -e "\n### Client ${CLIENT_NAME}
 [Peer]
 PublicKey = ${CLIENT_PUB_KEY}
@@ -467,7 +430,6 @@ AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128" >>"/etc/wireguard/${SER
 
 	wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}")
 
-	# Generate QR code if qrencode is installed
 	if command -v qrencode &>/dev/null; then
 		echo -e "${GREEN}\nHere is your client config file as a QR Code:\n${NC}"
 		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
@@ -507,17 +469,13 @@ function revokeClient() {
 		fi
 	done
 
-	# match the selected number to a client name
 	CLIENT_NAME=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
 
-	# remove [Peer] block matching $CLIENT_NAME
 	sed -i "/^### Client ${CLIENT_NAME}\$/,/^$/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
 
-	# remove generated client file
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 	rm -f "${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
 
-	# restart wireguard to apply changes
 	wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}")
 }
 
@@ -569,10 +527,7 @@ function uninstallWg() {
 		if [[ ${OS} == 'alpine' ]]; then
 			rc-service --quiet "wg-quick.${SERVER_WG_NIC}" status &>/dev/null
 		else
-			# Reload sysctl
 			sysctl --system
-
-			# Check if WireGuard is running
 			systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}"
 		fi
 		WG_RUNNING=$?
@@ -624,10 +579,8 @@ function manageMenu() {
 	esac
 }
 
-# Check for root, virt, OS...
 initialCheck
 
-# Check if WireGuard is already installed and load params
 if [[ -e /etc/wireguard/params ]]; then
 	source /etc/wireguard/params
 	manageMenu
