@@ -1,81 +1,3 @@
-# WireGuard installer
-
-![Lint](https://github.com/angristan/wireguard-install/workflows/Lint/badge.svg)
-[![Say Thanks!](https://img.shields.io/badge/Say%20Thanks-!-1EAEDB.svg)](https://saythanks.io/to/angristan)
-
-**This project is a bash script that aims to setup a [WireGuard](https://www.wireguard.com/) VPN on a Linux server, as easily as possible!**
-
-WireGuard is a point-to-point VPN that can be used in different ways. Here, we mean a VPN as in: the client will forward all its traffic through an encrypted tunnel to the server.
-The server will apply NAT to the client's traffic so it will appear as if the client is browsing the web with the server's IP.
-
-The script supports both IPv4 and IPv6. Please check the [issues](https://github.com/angristan/wireguard-install/issues) for ongoing development, bugs and planned features! You might also want to check the [discussions](https://github.com/angristan/wireguard-install/discussions) for help.
-
-WireGuard does not fit your environment? Check out [openvpn-install](https://github.com/angristan/openvpn-install).
-
-## Requirements
-
-Supported distributions:
-
-- AlmaLinux >= 8
-- Alpine Linux
-- Arch Linux
-- CentOS Stream >= 8
-- Debian >= 10
-- Fedora >= 32
-- Oracle Linux
-- Rocky Linux >= 8
-- Ubuntu >= 18.04
-
-## Usage
-
-Download and execute the script. Answer the questions asked by the script and it will take care of the rest.
-
-```bash
-curl -O https://raw.githubusercontent.com/angristan/wireguard-install/master/wireguard-install.sh
-chmod +x wireguard-install.sh
-./wireguard-install.sh
-```
-
-It will install WireGuard (kernel module and tools) on the server, configure it, create a systemd service and a client configuration file.
-
-Run the script again to add or remove clients!
-
-## Providers
-
-I recommend these cheap cloud providers for your VPN server:
-
-- [Vultr](https://www.vultr.com/?ref=8948982-8H): Worldwide locations, IPv6 support, starting at \$5/month
-- [Hetzner](https://hetzner.cloud/?ref=ywtlvZsjgeDq): Germany, Finland and USA. IPv6, 20 TB of traffic, starting at 4.5€/month
-- [Digital Ocean](https://m.do.co/c/ed0ba143fe53): Worldwide locations, IPv6 support, starting at \$4/month
-
-## Contributing
-
-Contributions are welcome! Here's how you can help:
-
-### Discuss changes
-
-Please open an issue before submitting a PR if you want to discuss a change, especially if it's a big one.
-
-### Code formatting
-
-We use [shellcheck](https://github.com/koalaman/shellcheck) and [shfmt](https://github.com/mvdan/sh) to enforce bash styling guidelines and good practices. They are executed for each commit / PR with GitHub Actions, so you can check the configuration [here](https://github.com/angristan/wireguard-install/blob/master/.github/workflows/lint.yml).
-
-## Say thanks
-
-You can [say thanks](https://saythanks.io/to/angristan) if you want!
-
-## Credits & Licence
-
-This project is under the [MIT Licence](https://raw.githubusercontent.com/angristan/wireguard-install/master/LICENSE)
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=angristan/wireguard-install&type=Date)](https://star-history.com/#angristan/wireguard-install&Date)
-
-
-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-NEW BY THE FORK
-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 # WireGuard-Remotezugang mit ProtonVPN-Uplink und WAN-Bypass für Heimdienste
 
 ## Ziel
@@ -366,7 +288,7 @@ Im `wg0`-Interface werden die Skripte per `PostUp` und `PostDown` eingebunden.
 ```ini
 # Do not alter the commented lines
 # They are used by wireguard-install
-# ENDPOINT wg-entry.duckdns.org
+# ENDPOINT wg-pesthund.duckdns.org
 
 [Interface]
 Address = 10.7.0.1/24
@@ -384,9 +306,25 @@ AllowedIPs = 10.7.0.2/32
 
 ---
 
-## ProtonVPN-Interface `/etc/wireguard/proton0.conf`
+## ProtonVPN einrichten (`proton0`)
 
-Ein minimales Beispiel:
+Dieser Abschnitt beschreibt die vollständige Einrichtung des ausgehenden WireGuard-Tunnels zu ProtonVPN.
+
+### 1. ProtonVPN-WireGuard-Konfiguration beschaffen
+
+Im ProtonVPN-Konto wird eine **manuelle WireGuard-Konfiguration** für einen gewünschten Server erzeugt und heruntergeladen.
+
+Benötigt werden daraus insbesondere:
+
+- Private Key
+- Interface-Adresse(n)
+- Peer Public Key
+- Endpoint
+- optional DNS-Server
+
+### 2. Konfigurationsdatei anlegen
+
+Datei: `/etc/wireguard/proton0.conf`
 
 ```ini
 [Interface]
@@ -402,9 +340,78 @@ Endpoint = <PROTON_ENDPOINT>:51820
 PersistentKeepalive = 25
 ```
 
-### Wichtiger Hinweis
+### Bedeutung der wichtigsten Optionen
 
-`Table = off` ist bewusst gesetzt, damit `proton0` **nicht automatisch** die globale Default-Route des Systems überschreibt. Die Nutzung für Client-Traffic wird stattdessen gezielt per **Policy Routing** erzwungen.
+- `Table = off`
+  - verhindert, dass `wg-quick` automatisch die globale Default-Route des Systems umbiegt
+  - das Routing für Client-Traffic wird in dieser Anleitung bewusst über **Policy Routing** gesteuert
+- `AllowedIPs = 0.0.0.0/0, ::/0`
+  - bedeutet: ProtonVPN ist grundsätzlich als Standard-Uplink für IPv4 und IPv6 geeignet
+- `PersistentKeepalive = 25`
+  - hält NAT-Mappings stabil, was besonders hinter Heimroutern sinnvoll ist
+
+### 3. DNS-Zeile bewusst weglassen
+
+In dieser Anleitung wird in `proton0.conf` **keine** `DNS = ...`-Zeile verwendet.
+
+Grund:
+
+- `wg-quick` verarbeitet `DNS = ...` über `resolvconf`
+- auf vielen minimalistischen Debian-/LXC-Installationen ist `resolvconf` nicht vorhanden
+- für dieses Setup ist die DNS-Konfiguration des Hosts für `proton0` nicht entscheidend
+
+Falls trotzdem eine `DNS = ...`-Zeile gewünscht ist, muss zusätzlich ein passender Resolver-Handler installiert werden, zum Beispiel `openresolv`.
+
+### 4. Tunnel manuell testen
+
+```bash
+wg-quick up proton0
+wg show proton0
+ip addr show proton0
+```
+
+Wenn `proton0` sauber hochkommt, sollte ein Handshake mit dem Proton-Server sichtbar sein.
+
+### 5. Autostart aktivieren
+
+```bash
+systemctl enable --now wg-quick@proton0
+systemctl status wg-quick@proton0 --no-pager -l
+```
+
+### 6. Funktion prüfen
+
+```bash
+wg show proton0
+ip route show table main
+ip addr show proton0
+```
+
+Optional kann testweise geprüft werden, ob ein explizit über `proton0` gerouteter Request den Proton-Uplink nutzt. In dieser Anleitung erfolgt die eigentliche Nutzung von `proton0` jedoch gezielt über die später beschriebenen Policy-Routing-Regeln.
+
+### 7. Typische Fehler
+
+#### `resolvconf: command not found`
+
+Wenn `wg-quick up proton0` mit diesem Fehler abbricht, ist fast immer eine `DNS = ...`-Zeile in `proton0.conf` vorhanden.
+
+Lösung:
+
+- `DNS = ...` entfernen
+- oder `openresolv` / `resolvconf` installieren
+
+#### `Table = off` vergessen
+
+Wenn `Table = off` fehlt, kann `wg-quick` automatisch die globale Default-Route umstellen. Das kollidiert mit dem hier beschriebenen Policy-Routing-Ansatz.
+
+#### Kein Handshake sichtbar
+
+Dann sind meist diese Punkte zu prüfen:
+
+- falscher Private/Public Key
+- falscher Proton-Endpoint
+- lokale Firewall blockiert ausgehenden UDP-Verkehr
+- `PersistentKeepalive` fehlt bei NAT-sensiblen Umgebungen
 
 ---
 
@@ -608,5 +615,3 @@ Der zentrale Trick ist:
 - die **aktuelle WAN-IP** wird automatisch aus einem DynDNS-Namen aufgelöst und als `/32`-Bypass-Regel gepflegt.
 
 Dadurch bleibt ein Heimdienst wie `dienst.schlumpf.gleeze.com:44385` über den normalen Heimanschluss erreichbar, während sonstiger Verkehr über ProtonVPN läuft.
-
-
