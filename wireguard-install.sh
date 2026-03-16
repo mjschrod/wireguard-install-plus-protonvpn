@@ -114,6 +114,22 @@ function getHomeDirForClient() {
 	echo "$HOME_DIR"
 }
 
+function detectLocalDNS() {
+	local GW
+
+	# Standardgateway ermitteln
+	GW=$(ip -4 route ls default | awk '{print $3}' | head -1)
+
+	# Nur private IPv4-Adressen akzeptieren
+	if [[ ${GW} =~ ^10\. ]] || \
+	   [[ ${GW} =~ ^192\.168\. ]] || \
+	   [[ ${GW} =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+		echo "${GW}"
+	else
+		echo ""
+	fi
+}
+
 function initialCheck() {
 	isRoot
 	checkOS
@@ -171,6 +187,14 @@ function installQuestions() {
 		fi
 	done
 
+	# Lokalen DNS automatisch erkennen (meist das Default-Gateway)
+	CLIENT_DNS_3=$(detectLocalDNS)
+
+	# Doppelte DNS-Einträge vermeiden
+	if [[ "${CLIENT_DNS_3}" == "${CLIENT_DNS_1}" ]] || [[ "${CLIENT_DNS_3}" == "${CLIENT_DNS_2}" ]]; then
+		CLIENT_DNS_3=""
+	fi
+
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
 		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i '0.0.0.0/0,::/0' ALLOWED_IPS
@@ -181,6 +205,10 @@ function installQuestions() {
 
 	echo ""
 	echo "Okay, that was all I needed. We are ready to setup your WireGuard server now."
+	if [[ -n "${CLIENT_DNS_3}" ]]; then
+		echo "Detected local DNS resolver: ${CLIENT_DNS_3}"
+		echo "It will be added automatically to generated client configs."
+	fi
 	echo "You will be able to generate a client at the end of the installation."
 	read -n1 -r -p "Press any key to continue..."
 }
@@ -254,6 +282,7 @@ SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
 SERVER_PUB_KEY=${SERVER_PUB_KEY}
 CLIENT_DNS_1=${CLIENT_DNS_1}
 CLIENT_DNS_2=${CLIENT_DNS_2}
+CLIENT_DNS_3=${CLIENT_DNS_3}
 ALLOWED_IPS=${ALLOWED_IPS}" >/etc/wireguard/params
 
 	# Add server interface
@@ -406,11 +435,17 @@ function newClient() {
 
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
+	if [[ -n "${CLIENT_DNS_3}" ]]; then
+		CLIENT_DNS_LINE="DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2},${CLIENT_DNS_3}"
+	else
+		CLIENT_DNS_LINE="DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}"
+	fi
+
 	# Create client file and add the server as a peer
 	echo "[Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
-DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}
+${CLIENT_DNS_LINE}
 
 # Uncomment the next line to set a custom MTU
 # This might impact performance, so use it only if you know what you are doing
